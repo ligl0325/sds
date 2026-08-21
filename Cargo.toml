@@ -18,6 +18,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [dependencies.cang-jie]
 git = "https://github.com/DCjanus/cang-jie"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 name = "sds"
 path = "src/lib.rs"

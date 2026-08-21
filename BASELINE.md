@@ -7,8 +7,8 @@
 | 部署二进制 | `/home/lgl/.local/bin/sds` |
 | 源码基线 | `master` 独立根提交 |
 | 二进制版本 | `sds 0.1.0` |
-| SHA-256 | `887b26b31976356334c50e3268c32c3a1664259ddfcff37f918156995f565fb8` |
-| 文件大小 | `6788248` bytes |
+| SHA-256 | `b25c4534610f167da62b10614e217a2e50cfc4598c2b43d346dcf832828e46e8` |
+| 文件大小 | `6790008` bytes |
 | Rust工具链 | `1.96.0` |
 
 ## 可复现验证
@@ -29,5 +29,6 @@ sha256sum target/release/sds /home/lgl/.local/bin/sds
 
 ## 数据安全
 
-- 原部署二进制离线备份：`/home/lgl/backups/sds-pre-standalone-binary-e98ef0d.bak`
+- 独立化前二进制离线备份：`/home/lgl/backups/sds-pre-standalone-binary-e98ef0d.bak`
+- 读写拆分前二进制备份：`/home/lgl/backups/sds-pre-readwrite-split-20260821_224243.bak`
 - 本次未修改 `/home/lgl/.sds/` 中的真实索引和记忆数据

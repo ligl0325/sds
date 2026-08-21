@@ -1,4 +1,4 @@
-use sds::index::SdsIndex;
+use sds::index::{SdsIndex, SdsWriter};
 use std::path::PathBuf;
 
 /// 闪搜 SDS — Smart Data Search: 轻量中文记忆 CLI 工具
@@ -97,43 +97,61 @@ fn main() -> anyhow::Result<()> {
     let sds_dir = data_dir()?;
     ensure_dir(&sds_dir)?;
 
-    // 文件锁
-    let lock_path = sds_dir.join("sds.lock");
-    let lock_file = std::fs::File::create(&lock_path)?;
-    fs2::FileExt::try_lock_exclusive(&lock_file)
-        .map_err(|_| anyhow::anyhow!("无法获取文件锁，可能有其他进程正在使用"))?;
-
-    // 一次性打开索引，所有命令复用
-    let mut index = SdsIndex::open(&sds_dir)?;
-
     match &cli.command {
-        Command::Store { text, source, tags } => cmd_store(&mut index, text, source, tags),
+        Command::Store { text, source, tags } => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_store(&mut writer, text, source, tags)
+        }
         Command::Search {
             query,
             top,
             json,
             tag,
             source,
-        } => cmd_search(
-            &index,
-            query,
-            *top,
-            *json,
-            tag.as_deref(),
-            source.as_deref(),
-        ),
+        } => {
+            let index = SdsIndex::open_readonly(&sds_dir)?;
+            cmd_search(
+                &index,
+                query,
+                *top,
+                *json,
+                tag.as_deref(),
+                source.as_deref(),
+            )
+        }
         Command::List {
             limit,
             offset,
             json,
             source,
-        } => cmd_list(&index, *limit, *offset, *json, source.as_deref()),
-        Command::Delete { id, source } => cmd_delete(&mut index, *id, source.as_deref()),
-        Command::Status { json } => cmd_status(&index, *json),
-        Command::Export { format } => cmd_export(&index, format),
-        Command::Compact => cmd_compact(&mut index),
-        Command::Import { dir, source, tags } => cmd_import(&mut index, dir, source, tags),
-        Command::Migrate { path } => cmd_migrate_sqlite(&mut index, path),
+        } => {
+            let index = SdsIndex::open_readonly(&sds_dir)?;
+            cmd_list(&index, *limit, *offset, *json, source.as_deref())
+        }
+        Command::Delete { id, source } => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_delete(&mut writer, *id, source.as_deref())
+        }
+        Command::Status { json } => {
+            let index = SdsIndex::open_readonly(&sds_dir)?;
+            cmd_status(&index, *json)
+        }
+        Command::Export { format } => {
+            let index = SdsIndex::open_readonly(&sds_dir)?;
+            cmd_export(&index, format)
+        }
+        Command::Compact => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_compact(&mut writer)
+        }
+        Command::Import { dir, source, tags } => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_import(&mut writer, dir, source, tags)
+        }
+        Command::Migrate { path } => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_migrate_sqlite(&mut writer, path)
+        }
     }
 }
 
@@ -155,7 +173,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
 
 // ── 命令实现 ──
 
-fn cmd_store(index: &mut SdsIndex, text: &str, source: &str, tags: &str) -> anyhow::Result<()> {
+fn cmd_store(index: &mut SdsWriter, text: &str, source: &str, tags: &str) -> anyhow::Result<()> {
     let mem = index.store(text, source, tags)?;
     println!("✅ 已存储 (id={})  |  {}", mem.id, fmt_ts(mem.created_at));
     println!("   text:   {}", mem.text);
@@ -242,7 +260,7 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_delete(index: &mut SdsIndex, id: Option<u64>, source: Option<&str>) -> anyhow::Result<()> {
+fn cmd_delete(index: &mut SdsWriter, id: Option<u64>, source: Option<&str>) -> anyhow::Result<()> {
     match (id, source) {
         (Some(id), None) => {
             if index.delete(id)? {
@@ -270,7 +288,7 @@ fn cmd_delete(index: &mut SdsIndex, id: Option<u64>, source: Option<&str>) -> an
 }
 
 fn cmd_status(index: &SdsIndex, json: bool) -> anyhow::Result<()> {
-    let status = index.status()?;
+    let status = index.status();
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
@@ -309,14 +327,14 @@ fn cmd_export(index: &SdsIndex, format: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_compact(index: &mut SdsIndex) -> anyhow::Result<()> {
+fn cmd_compact(index: &mut SdsWriter) -> anyhow::Result<()> {
     index.compact()?;
     println!("✅ compact 完成");
     Ok(())
 }
 
 /// 导入目录下的所有 .md 文件
-fn cmd_import(index: &mut SdsIndex, dir: &str, source: &str, tags: &str) -> anyhow::Result<()> {
+fn cmd_import(index: &mut SdsWriter, dir: &str, source: &str, tags: &str) -> anyhow::Result<()> {
     let base = dir.replace("~", &dirs::home_dir().unwrap().to_string_lossy());
     let base_path = std::path::Path::new(&base);
     if !base_path.exists() {
@@ -346,7 +364,7 @@ fn cmd_import(index: &mut SdsIndex, dir: &str, source: &str, tags: &str) -> anyh
         }
     }
 
-    index.writer().commit()?;
+    index.commit()?;
     eprintln!("  已导入: {} / {} ", count, total);
     println!(
         "✅ 导入完成: {} 条记忆（source={}, tags={}）",
@@ -393,7 +411,7 @@ fn auto_map_tags(source: &str) -> String {
     format!("{},misc", prefix)
 }
 
-fn cmd_migrate_sqlite(index: &mut SdsIndex, path: &str) -> anyhow::Result<()> {
+fn cmd_migrate_sqlite(index: &mut SdsWriter, path: &str) -> anyhow::Result<()> {
     let py_path = path.replace("~", &dirs::home_dir().unwrap().to_string_lossy());
     if !std::path::Path::new(&py_path).exists() {
         eprint!("Python 版数据库不存在: {}", py_path);
@@ -425,9 +443,8 @@ fn cmd_migrate_sqlite(index: &mut SdsIndex, path: &str) -> anyhow::Result<()> {
         count += 1;
     }
     if count > 0 {
-        index.writer().commit()?;
-        let counter_path = index.data_dir().join("counter");
-        std::fs::write(&counter_path, max_id.to_string())?;
+        index.commit()?;
+        index.set_counter(max_id)?;
     }
     println!("✅ 迁移完成: {} 条记忆 (max_id={})", count, max_id);
     Ok(())

@@ -116,6 +116,16 @@ sds migrate /path/to/memory.db
 
 兼容包含 `memories(id, text, source, created_at)` 表的 SQLite 数据库。导入过程保留来源字段，并根据来源生成基础标签。
 
+## 并发模型
+
+| 模式 | 句柄 | 命令 | 锁策略 |
+|---|---|---|---|
+| 只读 | `SdsIndex` | `search` / `list` / `status` / `export` | 不创建 `IndexWriter`，不获取独占锁 |
+| 写入 | `SdsWriter` | `store` / `delete` / `compact` / `import` / `migrate` | 持有进程级文件锁和 Tantivy 写锁 |
+| MCP | 按请求选择句柄 | `search/status/list_tags` 只读，`store` 写入 | 不在 MCP 进程生命周期内长期占用写锁 |
+
+多个只读进程可以并发查询；同一时间只允许一个写入进程。写入句柄不在 `Drop` 中隐式提交，批量操作必须显式 `commit()`。
+
 ## 技术栈
 
 - **引擎**：Tantivy 0.26（Rust 全文检索引擎）

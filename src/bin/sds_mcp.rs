@@ -18,14 +18,14 @@
 //! ```
 
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // 复用 SDS 的 index 模块
-use sds::index::SdsIndex;
+use sds::index::{SdsIndex, SdsWriter};
 
 // ── MCP 协议常量 ──
 
@@ -145,7 +145,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
 
 // ── 工具执行 ──
 
-fn execute_tool(index: &mut SdsIndex, name: &str, args: &Value) -> Result<Value> {
+fn execute_tool(data_dir: &Path, name: &str, args: &Value) -> Result<Value> {
     match name {
         "search" => {
             let query = args["query"]
@@ -155,6 +155,7 @@ fn execute_tool(index: &mut SdsIndex, name: &str, args: &Value) -> Result<Value>
             let tag = args["tag"].as_str();
             let source = args["source"].as_str();
 
+            let index = SdsIndex::open_readonly(data_dir)?;
             let results = index.search(query, top, tag, source)?;
             Ok(serde_json::json!({
                 "content": [
@@ -172,7 +173,8 @@ fn execute_tool(index: &mut SdsIndex, name: &str, args: &Value) -> Result<Value>
             let source = args["source"].as_str().unwrap_or("mcp");
             let tags = args["tags"].as_str().unwrap_or("");
 
-            let mem = index.store(text, source, tags)?;
+            let mut writer = SdsWriter::open(data_dir)?;
+            let mem = writer.store(text, source, tags)?;
             Ok(serde_json::json!({
                 "content": [
                     {
@@ -183,7 +185,8 @@ fn execute_tool(index: &mut SdsIndex, name: &str, args: &Value) -> Result<Value>
             }))
         }
         "status" => {
-            let status = index.status()?;
+            let index = SdsIndex::open_readonly(data_dir)?;
+            let status = index.status();
             Ok(serde_json::json!({
                 "content": [
                     {
@@ -198,6 +201,7 @@ fn execute_tool(index: &mut SdsIndex, name: &str, args: &Value) -> Result<Value>
         }
         "list_tags" => {
             // 从所有文档中收集唯一标签
+            let index = SdsIndex::open_readonly(data_dir)?;
             let all = index.all()?;
             let mut tags_set: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
@@ -259,8 +263,6 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut index = SdsIndex::open(&sds_dir)?;
-
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -296,7 +298,7 @@ fn main() -> Result<()> {
             }
         };
 
-        let response = handle_request(&mut index, &request);
+        let response = handle_request(&sds_dir, &request);
         let resp_str = serde_json::to_string(&response)?;
         let _ = writeln!(stdout, "{}", resp_str);
         let _ = stdout.flush();
@@ -305,7 +307,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_request(index: &mut SdsIndex, request: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_request(data_dir: &Path, request: &JsonRpcRequest) -> JsonRpcResponse {
     let id = request.id.clone();
 
     match request.method.as_str() {
@@ -353,7 +355,7 @@ fn handle_request(index: &mut SdsIndex, request: &JsonRpcRequest) -> JsonRpcResp
             let tool_name = params["name"].as_str().unwrap_or("");
             let arguments = params.get("arguments").unwrap_or(&empty_obj);
 
-            match execute_tool(index, tool_name, arguments) {
+            match execute_tool(data_dir, tool_name, arguments) {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: "2.0",
                     id,
