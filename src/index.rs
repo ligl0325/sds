@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +7,7 @@ use cang_jie::CangJieTokenizer;
 use fs2::FileExt;
 use tantivy::index::SegmentId;
 use tantivy::indexer::NoMergePolicy;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, EmptyQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 
@@ -71,6 +72,29 @@ fn build_schema() -> Schema {
     builder.build()
 }
 
+fn parse_query_with_literal_fallback(
+    parser: &QueryParser,
+    input: &str,
+) -> anyhow::Result<Box<dyn tantivy::query::Query>> {
+    if !input.chars().any(char::is_alphanumeric) {
+        return Ok(Box::new(EmptyQuery));
+    }
+
+    if let Ok(query) = parser.parse_query(input) {
+        return Ok(query);
+    }
+
+    // 保留正常AND/OR/短语语法；只有语法错误时才退化为安全字面量短语。
+    let escaped = input.replace('\\', "\\\\").replace('"', "\\\"");
+    let quoted = format!("\"{escaped}\"");
+    if let Ok(query) = parser.parse_query(&quoted) {
+        return Ok(query);
+    }
+
+    // 纯标点可能无法产生词元；lenient解析保证查询请求不因用户文本崩溃。
+    Ok(parser.parse_query_lenient(input).0)
+}
+
 fn open_or_create_index(data_dir: &Path) -> anyhow::Result<Index> {
     let index_dir = data_dir.join(INDEX_DIR);
     std::fs::create_dir_all(&index_dir)?;
@@ -131,15 +155,24 @@ impl SdsIndex {
         let mut sub_queries: Vec<(Box<dyn tantivy::query::Query>, Occur)> = Vec::new();
 
         let text_parser = QueryParser::for_index(&self.index, vec![self.fields.text_lower]);
-        sub_queries.push((text_parser.parse_query(&query.to_lowercase())?, Occur::Must));
+        sub_queries.push((
+            parse_query_with_literal_fallback(&text_parser, &query.to_lowercase())?,
+            Occur::Must,
+        ));
 
         if let Some(tag) = tag {
             let parser = QueryParser::for_index(&self.index, vec![self.fields.tags]);
-            sub_queries.push((parser.parse_query(tag)?, Occur::Must));
+            sub_queries.push((
+                parse_query_with_literal_fallback(&parser, tag)?,
+                Occur::Must,
+            ));
         }
         if let Some(source) = source {
             let parser = QueryParser::for_index(&self.index, vec![self.fields.source]);
-            sub_queries.push((parser.parse_query(source)?, Occur::Must));
+            sub_queries.push((
+                parse_query_with_literal_fallback(&parser, source)?,
+                Occur::Must,
+            ));
         }
 
         let query = if sub_queries.len() == 1 {
@@ -439,7 +472,18 @@ impl SdsWriter {
     }
 
     pub fn set_counter(&self, value: u64) -> anyhow::Result<()> {
-        std::fs::write(self.index.data_dir.join(COUNTER_FILE), value.to_string())?;
+        let path = self.index.data_dir.join(COUNTER_FILE);
+        let temporary_path = self.index.data_dir.join(".counter.tmp");
+        {
+            let mut temporary = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&temporary_path)?;
+            temporary.write_all(value.to_string().as_bytes())?;
+            temporary.sync_all()?;
+        }
+        std::fs::rename(temporary_path, path)?;
         Ok(())
     }
 

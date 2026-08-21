@@ -108,3 +108,39 @@ fn test_it_index_006_store_auto_limits_segment_growth() -> anyhow::Result<()> {
     assert_eq!(reader.search("自动归并", 50, None, None)?.len(), 40);
     Ok(())
 }
+
+#[test]
+fn test_it_index_007_malformed_query_falls_back_to_literal() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+    let mut writer = SdsWriter::open(&data_dir)?;
+    writer.store("函数(foo:bar) 路径 C:\\tmp", "code:test", "query")?;
+
+    assert!(!writer.search("函数(foo:bar)", 10, None, None)?.is_empty());
+    assert!(writer.search("(", 10, None, None)?.is_empty());
+    assert!(writer.search("\"未闭合", 10, None, None).is_ok());
+    assert!(writer.search("路径 C:\\tmp", 10, None, None).is_ok());
+    assert!(
+        writer
+            .search("函数", 10, Some("query("), Some("code:test"))
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
+fn test_it_index_008_counter_update_is_atomic_and_continuous() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+    let mut writer = SdsWriter::open(&data_dir)?;
+
+    writer.set_counter(41)?;
+    assert_eq!(writer.max_id()?, 41);
+    assert!(!data_dir.join(".counter.tmp").exists());
+
+    let memory = writer.store("原子计数器测试", "test", "counter")?;
+    assert_eq!(memory.id, 42);
+    assert_eq!(writer.max_id()?, 42);
+    assert!(!data_dir.join(".counter.tmp").exists());
+    Ok(())
+}

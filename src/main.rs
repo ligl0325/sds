@@ -306,16 +306,18 @@ fn cmd_export(index: &SdsIndex, format: &str) -> anyhow::Result<()> {
     match format {
         "json" => println!("{}", serde_json::to_string_pretty(&results)?),
         "csv" => {
-            println!("id,text,source,tags,created_at");
-            for mem in &results {
-                let text_escaped = mem.text.replace('"', "\"\"");
-                let source_escaped = mem.source.replace('"', "\"\"");
-                let tags_escaped = mem.tags.replace('"', "\"\"");
-                println!(
-                    "{},{},{},{},{}",
-                    mem.id, text_escaped, source_escaped, tags_escaped, mem.created_at
-                );
+            let mut writer = csv::Writer::from_writer(std::io::stdout());
+            writer.write_record(["id", "text", "source", "tags", "created_at"])?;
+            for memory in &results {
+                writer.serialize((
+                    memory.id,
+                    &memory.text,
+                    &memory.source,
+                    &memory.tags,
+                    memory.created_at,
+                ))?;
             }
+            writer.flush()?;
         }
         _ => {
             return Err(anyhow::anyhow!(

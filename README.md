@@ -67,6 +67,8 @@ sds search "关键词" --top 10 --tag "github" --source "cli" --json
 | `--source` | 按来源过滤（全文匹配） | 不过滤 |
 | `--json` | JSON 格式输出 | 否 |
 
+正常的 `AND` / `OR` / 短语查询语法保持可用；若用户输入包含未闭合括号、引号、路径等非法查询语法，SDS会自动退化为安全字面量查询。纯标点查询返回空结果，不会误召回全库。
+
 ### list — 列出记忆
 
 ```bash
@@ -97,8 +99,10 @@ sds status --json    # JSON 格式
 
 ```bash
 sds export --format json    # JSON 导出
-sds export --format csv     # CSV 导出（含 tags 列）
+sds export --format csv     # 标准 RFC 4180 CSV（含 tags 列）
 ```
+
+CSV由专用序列化器生成，正确处理逗号、双引号和字段内换行。
 
 ### compact — 分批合并与物理回收
 
