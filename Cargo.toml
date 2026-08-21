@@ -1,0 +1,37 @@
+[package]
+name = "sds"
+version = "0.1.0"
+edition = "2024"
+description = "闪搜 SDS — Smart Data Search: 轻量中文记忆 CLI + MCP Server 工具"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tantivy = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+dirs = "5"
+fs2 = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[dependencies.cang-jie]
+git = "https://github.com/DCjanus/cang-jie"
+
+[lib]
+name = "sds"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sds"
+path = "src/main.rs"
+
+[[bin]]
+name = "sds-mcp"
+path = "src/bin/sds_mcp.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "z"
