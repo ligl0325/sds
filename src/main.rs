@@ -328,8 +328,32 @@ fn cmd_export(index: &SdsIndex, format: &str) -> anyhow::Result<()> {
 }
 
 fn cmd_compact(index: &mut SdsWriter) -> anyhow::Result<()> {
-    index.compact()?;
-    println!("✅ compact 完成");
+    let stats = index.compact()?;
+    let segment_pct = stats
+        .segments_before
+        .saturating_sub(stats.segments_after)
+        .saturating_mul(100)
+        .checked_div(stats.segments_before)
+        .unwrap_or(0);
+    let file_pct = stats
+        .files_before
+        .saturating_sub(stats.files_after)
+        .saturating_mul(100)
+        .checked_div(stats.files_before)
+        .unwrap_or(0);
+    println!("✅ 索引合并完成");
+    println!(
+        "   Segment:  {} → {}  (-{}%)",
+        stats.segments_before, stats.segments_after, segment_pct
+    );
+    println!(
+        "   文件:     {} → {}  (-{}%)",
+        stats.files_before, stats.files_after, file_pct
+    );
+    println!("   索引:     {} → {}", stats.size_before, stats.size_after);
+    println!("   文档:     {}", stats.memories);
+    println!("   合并批次: {}", stats.merge_operations);
+    println!("   耗时:     {:.2}s", stats.elapsed_ms as f64 / 1000.0);
     Ok(())
 }
 

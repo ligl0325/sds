@@ -54,3 +54,57 @@ fn test_it_index_004_store_delete_roundtrip() -> anyhow::Result<()> {
     assert!(writer.search("CRUD回归", 10, None, None)?.is_empty());
     Ok(())
 }
+
+#[test]
+fn test_it_index_005_compact_merges_segments_and_preserves_data() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+
+    // 模拟CLI逐条调用：每次启动一个Writer并提交一条，制造单文档段。
+    for index in 0..20 {
+        let mut writer = SdsWriter::open(&data_dir)?;
+        writer.store(&format!("合并回归文档 {index}"), "compact-test", "compact")?;
+    }
+
+    let mut writer = SdsWriter::open(&data_dir)?;
+    let segments_before = writer.segment_ids().len();
+    assert!(segments_before > 1, "测试必须先制造多个Segment");
+
+    let stats = writer.compact()?;
+    assert_eq!(stats.segments_before, segments_before);
+    assert_eq!(stats.segments_after, 1);
+    assert_eq!(stats.memories, 20);
+    assert!(stats.merge_operations >= 1);
+    assert!(stats.files_after < stats.files_before);
+    assert_eq!(writer.search("合并回归", 30, None, None)?.len(), 20);
+
+    let second = writer.compact()?;
+    assert_eq!(second.segments_before, 1);
+    assert_eq!(second.segments_after, 1);
+    assert_eq!(second.memories, 20);
+    assert_eq!(second.merge_operations, 0);
+    Ok(())
+}
+
+#[test]
+fn test_it_index_006_store_auto_limits_segment_growth() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+
+    for index in 0..40 {
+        let mut writer = SdsWriter::open(&data_dir)?;
+        writer.store(
+            &format!("自动归并文档 {index}"),
+            "auto-compact-test",
+            "compact",
+        )?;
+    }
+
+    let reader = SdsIndex::open_readonly(&data_dir)?;
+    let segment_count = reader.segment_ids().len();
+    assert!(segment_count <= 32, "段数必须受自动归并阈值约束");
+    assert!(segment_count < 40, "自动归并必须实际发生");
+    assert_eq!(reader.status().memories, 40);
+    assert_eq!(reader.search("自动归并", 50, None, None)?.len(), 40);
+    Ok(())
+}

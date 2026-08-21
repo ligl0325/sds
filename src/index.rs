@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use cang_jie::CangJieTokenizer;
 use fs2::FileExt;
+use tantivy::index::SegmentId;
+use tantivy::indexer::NoMergePolicy;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
@@ -12,6 +14,8 @@ const COUNTER_FILE: &str = "counter";
 const INDEX_DIR: &str = "tantivy_index";
 const LOCK_FILE: &str = "sds.lock";
 const WRITER_MEMORY_BUDGET: usize = 50_000_000;
+const COMPACT_MERGE_BATCH_SIZE: usize = 64;
+const AUTO_COMPACT_SEGMENT_THRESHOLD: usize = 32;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
 pub struct Memory {
@@ -250,6 +254,15 @@ impl SdsIndex {
         Ok(value.trim().parse::<u64>().unwrap_or(0))
     }
 
+    pub fn segment_ids(&self) -> Vec<SegmentId> {
+        self.reader
+            .searcher()
+            .segment_readers()
+            .iter()
+            .map(|segment_reader| segment_reader.segment_id())
+            .collect()
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
@@ -317,6 +330,8 @@ impl SdsWriter {
 
         let index = SdsIndex::open_readonly(data_dir)?;
         let writer = index.index.writer(WRITER_MEMORY_BUDGET)?;
+        // CLI进程生命周期很短，后台合并来不及完成；统一由SDS显式管理段生命周期。
+        writer.set_merge_policy(Box::new(NoMergePolicy));
         Ok(Self {
             index,
             writer,
@@ -336,6 +351,14 @@ impl SdsWriter {
     }
 
     pub fn commit(&mut self) -> anyhow::Result<()> {
+        self.flush()?;
+        if self.segment_ids().len() > AUTO_COMPACT_SEGMENT_THRESHOLD {
+            self.merge_all_segments()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
         self.writer.commit()?;
         self.index.reader.reload()?;
         Ok(())
@@ -368,8 +391,51 @@ impl SdsWriter {
         Ok(count as u64)
     }
 
-    pub fn compact(&mut self) -> anyhow::Result<()> {
-        self.commit()
+    /// 将索引中所有可搜索段合并为一个段，并回收旧段文件。
+    pub fn compact(&mut self) -> anyhow::Result<CompactStats> {
+        let started_at = std::time::Instant::now();
+        let index_dir = self.index.data_dir.join(INDEX_DIR);
+
+        self.flush()?;
+
+        let segments_before = self.segment_ids().len();
+        let files_before = count_files(&index_dir);
+        let size_before = dir_size_u64(&index_dir);
+        let memories = self.reader.searcher().num_docs();
+
+        let merge_operations = self.merge_all_segments()?;
+
+        let segments_after = self.segment_ids().len();
+        let files_after = count_files(&index_dir);
+        let size_after = dir_size_u64(&index_dir);
+
+        Ok(CompactStats {
+            segments_before,
+            segments_after,
+            files_before,
+            files_after,
+            size_before: fmt_bytes(size_before),
+            size_after: fmt_bytes(size_after),
+            memories,
+            merge_operations,
+            elapsed_ms: started_at.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn merge_all_segments(&mut self) -> anyhow::Result<usize> {
+        let mut merge_operations = 0;
+        while self.segment_ids().len() > 1 {
+            let ids = self.segment_ids();
+            for batch in ids.chunks(COMPACT_MERGE_BATCH_SIZE) {
+                if batch.len() > 1 {
+                    self.writer.merge(batch).wait()?;
+                    merge_operations += 1;
+                }
+            }
+            // 每轮提交并刷新，下一轮基于最新段列表继续归并。
+            self.flush()?;
+        }
+        Ok(merge_operations)
     }
 
     pub fn set_counter(&self, value: u64) -> anyhow::Result<()> {
@@ -421,8 +487,20 @@ pub struct SdsStatus {
     pub index_path: String,
 }
 
-fn dir_size(path: &Path) -> String {
-    let bytes = dir_size_u64(path);
+#[derive(serde::Serialize, Debug)]
+pub struct CompactStats {
+    pub segments_before: usize,
+    pub segments_after: usize,
+    pub files_before: usize,
+    pub files_after: usize,
+    pub size_before: String,
+    pub size_after: String,
+    pub memories: u64,
+    pub merge_operations: usize,
+    pub elapsed_ms: u64,
+}
+
+fn fmt_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
@@ -430,6 +508,25 @@ fn dir_size(path: &Path) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+fn count_files(path: &Path) -> usize {
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                count += count_files(&path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn dir_size(path: &Path) -> String {
+    fmt_bytes(dir_size_u64(path))
 }
 
 fn dir_size_u64(path: &Path) -> u64 {

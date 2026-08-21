@@ -100,13 +100,15 @@ sds export --format json    # JSON 导出
 sds export --format csv     # CSV 导出（含 tags 列）
 ```
 
-### compact — 物理回收
+### compact — 分批合并与物理回收
 
 ```bash
 sds compact
 ```
 
-回收已删除数据的存储空间。
+将全部可搜索 Segment 以每批 64 段的方式分轮归并，直到只剩 1 段，同时回收旧段文件。命令输出合并前后的 Segment 数、文件数、索引大小、文档数、合并批次和耗时。
+
+SDS自行管理段生命周期：写入提交后若 Segment 数超过 32，会自动执行分批归并，避免CLI逐条写入再次造成长期碎片化。
 
 ### migrate — 从 SQLite 导入
 
@@ -131,8 +133,8 @@ sds migrate /path/to/memory.db
 - **引擎**：Tantivy 0.26（Rust 全文检索引擎）
 - **分词**：cang-jie（jieba 中文分词）
 - **排序**：BM25
-- **索引大小**：~15MB / 1720 条
-- **检索速度**：~80ms
+- **索引大小**：96.8MB / 9443 条（1个 Segment）
+- **实测检索**：约 10ms，RSS 约 6.7MB
 
 ## 数据存储
 
