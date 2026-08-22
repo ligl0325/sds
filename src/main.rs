@@ -69,6 +69,34 @@ enum Command {
         /// SQLite 数据库路径
         path: String,
     },
+    /// 备份整个SDS数据目录
+    Backup {
+        /// 备份目标目录（必须不存在）
+        destination: PathBuf,
+    },
+    /// 从备份目录恢复SDS数据
+    Restore {
+        /// 备份目录路径
+        source: PathBuf,
+        /// 恢复前后都执行完整索引校验
+        #[arg(long)]
+        verify: bool,
+    },
+    /// 执行标准检索基准
+    Benchmark {
+        /// 基准查询
+        #[arg(long, default_value = "Hermes")]
+        query: String,
+        /// 重复次数
+        #[arg(long, default_value_t = 20)]
+        repeat: usize,
+        /// 每次返回条数
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// JSON输出
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn data_dir() -> anyhow::Result<PathBuf> {
@@ -86,6 +114,188 @@ fn ensure_dir(dir: &PathBuf) -> anyhow::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> anyhow::Result<()> {
+    if destination.exists() {
+        anyhow::bail!(
+            "目标目录已存在，为避免覆盖请换一个路径: {}",
+            destination.display()
+        );
+    }
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "sds.lock" || name == ".counter.tmp" || name == "schema_version.tmp" {
+            continue;
+        }
+        let source_path = entry.path();
+        let destination_path = destination.join(name);
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_backup(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    if !path.join("tantivy_index/meta.json").exists() {
+        anyhow::bail!("不是有效的SDS备份目录: {}", path.display());
+    }
+    let index = SdsIndex::open_readonly(path)?;
+    let status = index.status();
+    Ok(serde_json::json!({
+        "memories": status.memories,
+        "segments": status.segments,
+        "files": status.files,
+        "index_size": status.index_size,
+        "schema_version": status.schema_version,
+    }))
+}
+
+fn cmd_backup(index: &mut SdsWriter, destination: &std::path::Path) -> anyhow::Result<()> {
+    if destination.starts_with(index.data_dir()) {
+        anyhow::bail!("备份目标不能位于当前数据目录内部");
+    }
+    index.commit()?;
+    copy_tree(index.data_dir(), destination)?;
+    let report = verify_backup(destination)?;
+    println!("✅ 备份完成: {}", destination.display());
+    println!("   校验: {}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn acquire_data_lock(data_dir: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(data_dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(data_dir.join("sds.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .map_err(|_| anyhow::anyhow!("无法获取恢复锁，可能有其他写入进程正在使用"))?;
+    Ok(lock)
+}
+
+fn cmd_restore(
+    data_dir: &std::path::Path,
+    source: &std::path::Path,
+    verify: bool,
+) -> anyhow::Result<()> {
+    let source = source.canonicalize()?;
+    let data_dir = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    if source.starts_with(&data_dir) {
+        anyhow::bail!("备份源不能位于当前数据目录内部");
+    }
+    let before = verify_backup(&source)?;
+    if verify {
+        println!("📋 恢复前校验: {}", serde_json::to_string(&before)?);
+    }
+
+    let _lock = acquire_data_lock(&data_dir)?;
+    let staging = data_dir.with_file_name(".sds.restore-staging");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    copy_tree(&source, &staging)?;
+    let staged_report = verify_backup(&staging)?;
+
+    let backup_dir = data_dir.with_file_name(format!(
+        ".sds.pre-restore-{}",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    ));
+    std::fs::rename(&data_dir, &backup_dir)?;
+    std::fs::rename(&staging, &data_dir)?;
+
+    let after = verify_backup(&data_dir)?;
+    if verify && staged_report != after {
+        anyhow::bail!("恢复后校验结果与暂存备份不一致");
+    }
+    println!("✅ 恢复完成: {}", data_dir.display());
+    println!("   恢复前: {}", serde_json::to_string(&before)?);
+    println!("   恢复后: {}", serde_json::to_string(&after)?);
+    println!("   原数据保留: {}", backup_dir.display());
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct BenchmarkReport {
+    query: String,
+    repeat: usize,
+    top: usize,
+    result_count: usize,
+    min_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    max_ms: f64,
+    avg_ms: f64,
+    rss_kb: Option<u64>,
+}
+
+fn current_rss_kb() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    text.lines()
+        .find(|line| line.starts_with("VmRSS:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+}
+
+fn cmd_benchmark(
+    index: &SdsIndex,
+    query: &str,
+    repeat: usize,
+    top: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let repeat = repeat.max(1);
+    let _ = index.search(query, top, None, None)?;
+    let mut samples = Vec::with_capacity(repeat);
+    let mut result_count = 0;
+    for _ in 0..repeat {
+        let started = std::time::Instant::now();
+        result_count = index.search(query, top, None, None)?.len();
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p50 = samples[(samples.len() - 1) * 50 / 100];
+    let p95 = samples[(samples.len() - 1) * 95 / 100];
+    let report = BenchmarkReport {
+        query: query.to_string(),
+        repeat,
+        top,
+        result_count,
+        min_ms: samples[0],
+        p50_ms: p50,
+        p95_ms: p95,
+        max_ms: *samples.last().unwrap_or(&0.0),
+        avg_ms: samples.iter().sum::<f64>() / samples.len() as f64,
+        rss_kb: current_rss_kb(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("📈 SDS Benchmark");
+        println!("  query: {}", report.query);
+        println!(
+            "  repeat: {}  results: {}",
+            report.repeat, report.result_count
+        );
+        println!("  min: {:.3}ms", report.min_ms);
+        println!("  p50: {:.3}ms", report.p50_ms);
+        println!("  p95: {:.3}ms", report.p95_ms);
+        println!("  max: {:.3}ms", report.max_ms);
+        println!("  avg: {:.3}ms", report.avg_ms);
+        if let Some(rss) = report.rss_kb {
+            println!("  RSS: {}KB", rss);
+        }
     }
     Ok(())
 }
@@ -151,6 +361,20 @@ fn main() -> anyhow::Result<()> {
         Command::Migrate { path } => {
             let mut writer = SdsWriter::open(&sds_dir)?;
             cmd_migrate_sqlite(&mut writer, path)
+        }
+        Command::Backup { destination } => {
+            let mut writer = SdsWriter::open(&sds_dir)?;
+            cmd_backup(&mut writer, destination)
+        }
+        Command::Restore { source, verify } => cmd_restore(&sds_dir, source, *verify),
+        Command::Benchmark {
+            query,
+            repeat,
+            top,
+            json,
+        } => {
+            let index = SdsIndex::open_readonly(&sds_dir)?;
+            cmd_benchmark(&index, query, *repeat, *top, *json)
         }
     }
 }
@@ -295,6 +519,10 @@ fn cmd_status(index: &SdsIndex, json: bool) -> anyhow::Result<()> {
         println!("📊 闪搜 SDS 状态\n{}", "=".repeat(30));
         println!("  记忆: {} 条", status.memories);
         println!("  索引: {}", status.index_size);
+        println!("  Segment: {}", status.segments);
+        println!("  文件: {}", status.files);
+        println!("  碎片率: {:.4}%", status.fragmentation_rate);
+        println!("  Schema: v{}", status.schema_version);
         println!("  路径: {}", status.index_path);
         println!("  引擎: Tantivy + jieba 中文分词 (无需 GPU)");
     }

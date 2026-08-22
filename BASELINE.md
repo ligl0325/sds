@@ -6,9 +6,9 @@
 |---|---|
 | 部署二进制 | `/home/lgl/.local/bin/sds` |
 | 源码基线 | `master` 独立根提交 |
-| 二进制版本 | `sds 0.1.0` |
-| SHA-256 | `6365d598fb6b03c6a9a6972767868e43915ba3fdb9e2344975ae27e117c41f70` |
-| 文件大小 | `6861592` bytes |
+| 二进制版本 | `sds 0.2.0` |
+| SHA-256 | `a60db099eb1ae1107fb0c94de2965f4d4debb9cffa0281082e745054f5a5f69e` |
+| 文件大小 | `6898200` bytes |
 | Rust工具链 | `1.96.0` |
 
 ## 可复现验证
@@ -34,5 +34,7 @@ sha256sum target/release/sds /home/lgl/.local/bin/sds
 - 真合并前二进制备份：`/home/lgl/backups/sds-pre-true-compact-20260822_000437.bak`
 - 自动段治理前二进制备份：`/home/lgl/backups/sds-pre-auto-maintenance-20260822_001058.bak`
 - IO加固前二进制备份：`/home/lgl/backups/sds-pre-io-hardening-20260822_003000.bak`
+- v0.2.0最终部署前二进制备份：`/home/lgl/backups/sds-pre-v0.2.0-final-20260822_081520.bak`
 - 真合并前数据备份：`/home/lgl/backups/sds-data-pre-compact-20260821_234611`
+- v0.2.0当前数据备份：`/home/lgl/backups/sds-data-v0.2.0-20260822_003500`
 - 真实索引已从 9443 个 Segment 合并为 1 个；合并前后 9443 条记录全量导出SHA-256均为 `662e8c6f42d62d267f57f482081bdfb3b2fc2df4a71381c2cc3420b59e5975d9`

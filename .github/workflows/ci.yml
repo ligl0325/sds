@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  linux:
+    name: Linux check, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: JSON smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP_HOME=$(mktemp -d)
+          trap 'rm -rf "$TMP_HOME"' EXIT
+          HOME="$TMP_HOME" ./target/release/sds status --json > /tmp/sds-status.json
+          jq -e '.memories == 0 and .segments == 0 and .schema_version == 1' /tmp/sds-status.json
+          HOME="$TMP_HOME" ./target/release/sds benchmark --query smoke --repeat 3 --json \
+            | jq -e '.repeat == 3 and .p50_ms >= 0 and .p95_ms >= .p50_ms'

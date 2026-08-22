@@ -34,7 +34,16 @@ sds search "调研" --json --top 5
 ## 安装
 
 ```bash
-# 下载二进制到 PATH
+# 从GitHub最新Release安装Linux x86_64版本
+curl --fail --location https://raw.githubusercontent.com/ligl0325/sds/master/scripts/install.sh | bash
+
+# 安装指定版本
+SDS_VERSION=v0.2.0 curl --fail --location https://raw.githubusercontent.com/ligl0325/sds/master/scripts/install.sh | bash
+```
+
+安装脚本会校验Release压缩包SHA-256，并同时安装 `sds` 与 `sds-mcp` 到 `~/.local/bin/`。手动安装仍可直接复制二进制：
+
+```bash
 cp sds ~/.local/bin/sds
 chmod +x ~/.local/bin/sds
 ```
@@ -95,6 +104,25 @@ sds status           # 文本格式
 sds status --json    # JSON 格式
 ```
 
+JSON状态包含 `memories`、`segments`、`files`、`fragmentation_rate` 和 `schema_version`。碎片率定义为 `(segments - 1) / memories × 100%`，越接近0越健康。
+
+### backup / restore — 备份与恢复
+
+```bash
+sds backup /path/to/sds-backup
+sds restore /path/to/sds-backup --verify
+```
+
+`backup`要求目标目录不存在，复制前会先提交待写入内容并校验备份索引。`restore --verify`会先校验备份，再用暂存目录替换当前数据；原数据会保留为 `.sds.pre-restore-*`，恢复后再次校验。
+
+### benchmark — 标准检索基准
+
+```bash
+sds benchmark --query "Hermes" --repeat 20 --top 10 --json
+```
+
+输出 `min/p50/p95/max/avg` 延迟、结果数和当前进程RSS，默认先做一次预热，不包含CLI进程启动时间。
+
 ### export — 导出数据
 
 ```bash
@@ -131,6 +159,10 @@ sds migrate /path/to/memory.db
 | MCP | 按请求选择句柄 | `search/status/list_tags` 只读，`store` 写入 | 不在 MCP 进程生命周期内长期占用写锁 |
 
 多个只读进程可以并发查询；同一时间只允许一个写入进程。写入句柄不在 `Drop` 中隐式提交，批量操作必须显式 `commit()`。
+
+## Schema版本
+
+当前Schema为v1，版本记录在 `~/.sds/schema_version`。没有版本文件的早期索引按兼容v1读取；未来遇到高于当前程序的版本会拒绝写入并提示升级，避免静默破坏数据。
 
 ## 技术栈
 

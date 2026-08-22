@@ -31,7 +31,7 @@ use sds::index::{SdsIndex, SdsWriter};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "sds-mcp";
-const SERVER_VERSION: &str = "0.1.0";
+const SERVER_VERSION: &str = "0.2.0";
 
 // ── JSON-RPC 2.0 消息结构 ──
 

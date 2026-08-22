@@ -144,3 +144,15 @@ fn test_it_index_008_counter_update_is_atomic_and_continuous() -> anyhow::Result
     assert!(!data_dir.join(".counter.tmp").exists());
     Ok(())
 }
+
+#[test]
+fn test_it_index_009_future_schema_is_rejected() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+    let _writer = SdsWriter::open(&data_dir)?;
+    std::fs::write(data_dir.join("schema_version"), "2")?;
+
+    let result = SdsIndex::open_readonly(&data_dir);
+    assert!(result.is_err(), "当前程序不能静默读取未来Schema");
+    Ok(())
+}

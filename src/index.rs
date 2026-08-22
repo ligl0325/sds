@@ -14,6 +14,8 @@ use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 const COUNTER_FILE: &str = "counter";
 const INDEX_DIR: &str = "tantivy_index";
 const LOCK_FILE: &str = "sds.lock";
+const SCHEMA_VERSION_FILE: &str = "schema_version";
+const CURRENT_SCHEMA_VERSION: u32 = 1;
 const WRITER_MEMORY_BUDGET: usize = 50_000_000;
 const COMPACT_MERGE_BATCH_SIZE: usize = 64;
 const AUTO_COMPACT_SEGMENT_THRESHOLD: usize = 32;
@@ -34,6 +36,7 @@ pub struct SdsIndex {
     fields: SdsFields,
     reader: IndexReader,
     data_dir: PathBuf,
+    schema_version: u32,
 }
 
 /// 写入索引句柄：持有进程级文件锁和 Tantivy IndexWriter。
@@ -95,6 +98,37 @@ fn parse_query_with_literal_fallback(
     Ok(parser.parse_query_lenient(input).0)
 }
 
+fn read_schema_version(data_dir: &Path) -> anyhow::Result<u32> {
+    let path = data_dir.join(SCHEMA_VERSION_FILE);
+    if !path.exists() {
+        return Ok(CURRENT_SCHEMA_VERSION);
+    }
+    let version = std::fs::read_to_string(path)?.trim().parse::<u32>()?;
+    if version > CURRENT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "索引Schema版本 {} 高于当前程序支持的版本 {}，请升级SDS",
+            version,
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+    Ok(version)
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    let temporary_path = path.with_extension("tmp");
+    {
+        let mut temporary = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temporary_path)?;
+        temporary.write_all(content)?;
+        temporary.sync_all()?;
+    }
+    std::fs::rename(temporary_path, path)?;
+    Ok(())
+}
+
 fn open_or_create_index(data_dir: &Path) -> anyhow::Result<Index> {
     let index_dir = data_dir.join(INDEX_DIR);
     std::fs::create_dir_all(&index_dir)?;
@@ -120,6 +154,7 @@ fn open_or_create_index(data_dir: &Path) -> anyhow::Result<Index> {
 impl SdsIndex {
     pub fn open_readonly(data_dir: &Path) -> anyhow::Result<Self> {
         let index = open_or_create_index(data_dir)?;
+        let schema_version = read_schema_version(data_dir)?;
         let schema = index.schema();
         let fields = SdsFields {
             id: schema.get_field("id")?,
@@ -139,6 +174,7 @@ impl SdsIndex {
             fields,
             reader,
             data_dir: data_dir.to_path_buf(),
+            schema_version,
         })
     }
 
@@ -223,10 +259,20 @@ impl SdsIndex {
 
     pub fn status(&self) -> SdsStatus {
         let index_dir = self.data_dir.join(INDEX_DIR);
+        let memories = self.reader.searcher().num_docs();
+        let segments = self.segment_ids().len();
         SdsStatus {
-            memories: self.reader.searcher().num_docs(),
+            memories,
             index_size: dir_size(&index_dir),
             index_path: index_dir.to_string_lossy().to_string(),
+            segments,
+            files: count_files(&index_dir),
+            fragmentation_rate: if memories == 0 {
+                0.0
+            } else {
+                (((segments.saturating_sub(1)) as f64 / memories as f64) * 100.0).min(100.0)
+            },
+            schema_version: self.schema_version,
         }
     }
 
@@ -361,6 +407,11 @@ impl SdsWriter {
             .try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("无法获取写锁，可能有其他写入进程正在使用"))?;
 
+        let schema_path = data_dir.join(SCHEMA_VERSION_FILE);
+        if !schema_path.exists() {
+            atomic_write(&schema_path, CURRENT_SCHEMA_VERSION.to_string().as_bytes())?;
+        }
+
         let index = SdsIndex::open_readonly(data_dir)?;
         let writer = index.index.writer(WRITER_MEMORY_BUDGET)?;
         // CLI进程生命周期很短，后台合并来不及完成；统一由SDS显式管理段生命周期。
@@ -472,19 +523,10 @@ impl SdsWriter {
     }
 
     pub fn set_counter(&self, value: u64) -> anyhow::Result<()> {
-        let path = self.index.data_dir.join(COUNTER_FILE);
-        let temporary_path = self.index.data_dir.join(".counter.tmp");
-        {
-            let mut temporary = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temporary_path)?;
-            temporary.write_all(value.to_string().as_bytes())?;
-            temporary.sync_all()?;
-        }
-        std::fs::rename(temporary_path, path)?;
-        Ok(())
+        atomic_write(
+            &self.index.data_dir.join(COUNTER_FILE),
+            value.to_string().as_bytes(),
+        )
     }
 
     fn next_id(&self) -> anyhow::Result<u64> {
@@ -529,6 +571,10 @@ pub struct SdsStatus {
     pub memories: u64,
     pub index_size: String,
     pub index_path: String,
+    pub segments: usize,
+    pub files: usize,
+    pub fragmentation_rate: f64,
+    pub schema_version: u32,
 }
 
 #[derive(serde::Serialize, Debug)]
