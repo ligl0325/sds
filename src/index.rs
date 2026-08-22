@@ -3,6 +3,7 @@ use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
+use crate::metadata::{MemoryMeta, MetadataStore, text_hash};
 use cang_jie::CangJieTokenizer;
 use fs2::FileExt;
 use tantivy::index::SegmentId;
@@ -28,6 +29,8 @@ pub struct Memory {
     pub tags: String,
     pub created_at: f64,
     pub score: Option<f64>,
+    pub memory_type: String,
+    pub importance: f64,
 }
 
 /// 只读索引句柄：不创建 IndexWriter，也不获取独占锁。
@@ -37,6 +40,7 @@ pub struct SdsIndex {
     reader: IndexReader,
     data_dir: PathBuf,
     schema_version: u32,
+    metadata: MetadataStore,
 }
 
 /// 写入索引句柄：持有进程级文件锁和 Tantivy IndexWriter。
@@ -155,6 +159,7 @@ impl SdsIndex {
     pub fn open_readonly(data_dir: &Path) -> anyhow::Result<Self> {
         let index = open_or_create_index(data_dir)?;
         let schema_version = read_schema_version(data_dir)?;
+        let metadata = MetadataStore::open(data_dir)?;
         let schema = index.schema();
         let fields = SdsFields {
             id: schema.get_field("id")?,
@@ -175,6 +180,7 @@ impl SdsIndex {
             reader,
             data_dir: data_dir.to_path_buf(),
             schema_version,
+            metadata,
         })
     }
 
@@ -221,9 +227,15 @@ impl SdsIndex {
             Box::new(BooleanQuery::new(ordered))
         };
 
-        let top_docs =
-            searcher.search(&query, &TopDocs::with_limit(top_k.max(1)).order_by_score())?;
-        self.build_memory_list(&top_docs)
+        let candidate_limit = top_k.max(1).saturating_mul(5).min(100);
+        let top_docs = searcher.search(
+            &query,
+            &TopDocs::with_limit(candidate_limit).order_by_score(),
+        )?;
+        let mut results = self.build_memory_list(&top_docs)?;
+        self.rerank_memory_list(&mut results);
+        results.truncate(top_k.max(1));
+        Ok(results)
     }
 
     pub fn list(
@@ -368,13 +380,17 @@ impl SdsIndex {
     }
 
     fn doc_to_memory(&self, document: &TantivyDocument) -> Memory {
+        let id = self.get_u64(document, self.fields.id);
+        let metadata = self.metadata.get_or_default(id);
         Memory {
-            id: self.get_u64(document, self.fields.id),
+            id,
             text: self.get_str(document, self.fields.text),
             source: self.get_str(document, self.fields.source),
             tags: self.get_str(document, self.fields.tags),
             created_at: self.get_f64(document, self.fields.created_at),
             score: None,
+            memory_type: metadata.memory_type,
+            importance: metadata.importance,
         }
     }
 
@@ -391,6 +407,31 @@ impl SdsIndex {
             results.push(memory);
         }
         Ok(results)
+    }
+
+    fn rerank_memory_list(&self, results: &mut [Memory]) {
+        if results.is_empty() {
+            return;
+        }
+        let max_bm25 = results
+            .iter()
+            .filter_map(|memory| memory.score)
+            .fold(0.0_f64, f64::max);
+        let now = chrono::Utc::now().timestamp() as f64;
+        for memory in results.iter_mut() {
+            let bm25 = memory.score.unwrap_or(0.0);
+            let bm25_norm = if max_bm25 > 0.0 { bm25 / max_bm25 } else { 0.0 };
+            let age_days = ((now - memory.created_at) / 86_400.0).max(0.0);
+            let recency = (-age_days / 180.0).exp();
+            let importance = (memory.importance / 100.0).clamp(0.0, 1.0);
+            memory.score = Some(0.55 * bm25_norm + 0.20 * recency + 0.25 * importance);
+        }
+        results.sort_by(|left, right| {
+            right
+                .score
+                .unwrap_or(0.0)
+                .total_cmp(&left.score.unwrap_or(0.0))
+        });
     }
 }
 
@@ -424,14 +465,97 @@ impl SdsWriter {
     }
 
     pub fn store(&mut self, text: &str, source: &str, tags: &str) -> anyhow::Result<Memory> {
-        let memory = self.write_doc(text, source, tags)?;
+        self.store_with_options(text, source, tags, "fact", 50.0, false)
+    }
+
+    pub fn store_with_options(
+        &mut self,
+        text: &str,
+        source: &str,
+        tags: &str,
+        memory_type: &str,
+        importance: f64,
+        dedupe: bool,
+    ) -> anyhow::Result<Memory> {
+        let hash = text_hash(text);
+        let duplicate_id = if dedupe {
+            self.index.metadata.find_hash(&hash)
+        } else {
+            None
+        };
+        if let Some(id) = duplicate_id {
+            let existing = self.index.export_all()?.into_iter().find(|m| m.id == id);
+            if let Some(existing) = existing {
+                return Ok(existing);
+            }
+            self.index.metadata.remove(id);
+        }
+        let mut memory = self.write_doc(text, source, tags)?;
+        memory.memory_type = memory_type.to_string();
+        memory.importance = importance.clamp(0.0, 100.0);
+        self.index.metadata.insert(
+            memory.id,
+            MemoryMeta {
+                memory_type: memory.memory_type.clone(),
+                importance: memory.importance,
+                text_hash: hash,
+                updated_at: chrono::Utc::now().timestamp() as f64,
+            },
+        );
+        self.commit()?;
+        Ok(memory)
+    }
+
+    pub fn replace(
+        &mut self,
+        id: u64,
+        text: &str,
+        source: &str,
+        tags: &str,
+        memory_type: &str,
+        importance: f64,
+    ) -> anyhow::Result<Memory> {
+        let term = tantivy::Term::from_field_u64(self.index.fields.id, id);
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        if self
+            .index
+            .reader
+            .searcher()
+            .search(&query, &tantivy::collector::Count)?
+            == 0
+        {
+            anyhow::bail!("未找到要upsert的记忆id={id}");
+        }
+        self.writer.delete_query(Box::new(query))?;
+        let mut memory = self.write_doc_with_id(id, text, source, tags)?;
+        memory.memory_type = memory_type.to_string();
+        memory.importance = importance.clamp(0.0, 100.0);
+        self.index.metadata.insert(
+            id,
+            MemoryMeta {
+                memory_type: memory.memory_type.clone(),
+                importance: memory.importance,
+                text_hash: text_hash(text),
+                updated_at: chrono::Utc::now().timestamp() as f64,
+            },
+        );
         self.commit()?;
         Ok(memory)
     }
 
     /// 批量写入，不自动提交；调用方完成批次后必须调用 commit。
     pub fn batch_store(&mut self, text: &str, source: &str, tags: &str) -> anyhow::Result<Memory> {
-        self.write_doc(text, source, tags)
+        let memory = self.write_doc(text, source, tags)?;
+        self.index.metadata.insert(
+            memory.id,
+            MemoryMeta {
+                memory_type: "fact".to_string(),
+                importance: 50.0,
+                text_hash: text_hash(text),
+                updated_at: chrono::Utc::now().timestamp() as f64,
+            },
+        );
+        Ok(memory)
     }
 
     pub fn commit(&mut self) -> anyhow::Result<()> {
@@ -445,6 +569,7 @@ impl SdsWriter {
     fn flush(&mut self) -> anyhow::Result<()> {
         self.writer.commit()?;
         self.index.reader.reload()?;
+        self.index.metadata.persist()?;
         Ok(())
     }
 
@@ -457,6 +582,7 @@ impl SdsWriter {
             return Ok(false);
         }
         self.writer.delete_query(Box::new(query))?;
+        self.index.metadata.remove(id);
         self.commit()?;
         Ok(true)
     }
@@ -466,11 +592,21 @@ impl SdsWriter {
 
         let parser = QueryParser::for_index(&self.index.index, vec![self.index.fields.source]);
         let query = parser.parse_query(source)?;
+        let victims = self
+            .index
+            .export_all()?
+            .into_iter()
+            .filter(|memory| memory.source.contains(source))
+            .map(|memory| memory.id)
+            .collect::<Vec<_>>();
         let count = self.index.reader.searcher().search(&query, &Count)?;
         if count == 0 {
             return Ok(0);
         }
         self.writer.delete_query(query)?;
+        for id in victims {
+            self.index.metadata.remove(id);
+        }
         self.commit()?;
         Ok(count as u64)
     }
@@ -537,6 +673,16 @@ impl SdsWriter {
 
     fn write_doc(&mut self, text: &str, source: &str, tags: &str) -> anyhow::Result<Memory> {
         let id = self.next_id()?;
+        self.write_doc_with_id(id, text, source, tags)
+    }
+
+    fn write_doc_with_id(
+        &mut self,
+        id: u64,
+        text: &str,
+        source: &str,
+        tags: &str,
+    ) -> anyhow::Result<Memory> {
         let created_at = chrono::Utc::now().timestamp() as f64;
         let mut document = TantivyDocument::default();
         document.add_u64(self.index.fields.id, id);
@@ -554,6 +700,8 @@ impl SdsWriter {
             tags: tags.to_string(),
             created_at,
             score: None,
+            memory_type: "legacy".to_string(),
+            importance: 50.0,
         })
     }
 }

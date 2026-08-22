@@ -17,6 +17,14 @@ enum Command {
         source: String,
         #[arg(long, default_value = "")]
         tags: String,
+        #[arg(long = "type", default_value = "fact")]
+        memory_type: String,
+        #[arg(long, default_value_t = 50.0)]
+        importance: f64,
+        #[arg(long)]
+        dedupe: bool,
+        #[arg(long)]
+        upsert_id: Option<u64>,
     },
     Search {
         query: String,
@@ -308,9 +316,28 @@ fn main() -> anyhow::Result<()> {
     ensure_dir(&sds_dir)?;
 
     match &cli.command {
-        Command::Store { text, source, tags } => {
+        Command::Store {
+            text,
+            source,
+            tags,
+            memory_type,
+            importance,
+            dedupe,
+            upsert_id,
+        } => {
             let mut writer = SdsWriter::open(&sds_dir)?;
-            cmd_store(&mut writer, text, source, tags)
+            cmd_store(
+                &mut writer,
+                text,
+                source,
+                tags,
+                StoreOptions {
+                    memory_type,
+                    importance: *importance,
+                    dedupe: *dedupe,
+                    upsert_id: *upsert_id,
+                },
+            )
         }
         Command::Search {
             query,
@@ -397,12 +424,45 @@ fn truncate(text: &str, max_chars: usize) -> String {
 
 // ── 命令实现 ──
 
-fn cmd_store(index: &mut SdsWriter, text: &str, source: &str, tags: &str) -> anyhow::Result<()> {
-    let mem = index.store(text, source, tags)?;
+struct StoreOptions<'a> {
+    memory_type: &'a str,
+    importance: f64,
+    dedupe: bool,
+    upsert_id: Option<u64>,
+}
+
+fn cmd_store(
+    index: &mut SdsWriter,
+    text: &str,
+    source: &str,
+    tags: &str,
+    options: StoreOptions<'_>,
+) -> anyhow::Result<()> {
+    let mem = if let Some(id) = options.upsert_id {
+        index.replace(
+            id,
+            text,
+            source,
+            tags,
+            options.memory_type,
+            options.importance,
+        )?
+    } else {
+        index.store_with_options(
+            text,
+            source,
+            tags,
+            options.memory_type,
+            options.importance,
+            options.dedupe,
+        )?
+    };
     println!("✅ 已存储 (id={})  |  {}", mem.id, fmt_ts(mem.created_at));
     println!("   text:   {}", mem.text);
     println!("   source: {}", mem.source);
     println!("   tags:   {}", mem.tags);
+    println!("   type:   {}", mem.memory_type);
+    println!("   score:  {:.1}", mem.importance);
     Ok(())
 }
 

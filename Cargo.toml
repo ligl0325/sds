@@ -1,6 +1,6 @@
 [package]
 name = "sds"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "闪搜 SDS — Smart Data Search: 轻量中文记忆 CLI + MCP Server 工具"
 
@@ -15,6 +15,7 @@ dirs = "5"
 fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 csv = "1"
+sha2 = "0.10"
 
 [dependencies.cang-jie]
 git = "https://github.com/DCjanus/cang-jie"

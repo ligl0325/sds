@@ -31,7 +31,7 @@ use sds::index::{SdsIndex, SdsWriter};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "sds-mcp";
-const SERVER_VERSION: &str = "0.2.0";
+const SERVER_VERSION: &str = "0.3.0";
 
 // ── JSON-RPC 2.0 消息结构 ──
 
@@ -119,6 +119,22 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "tags": {
                         "type": "string",
                         "description": "逗号分隔的标签"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "记忆类型，如 fact/rule/preference/summary"
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "重要性0-100，默认50"
+                    },
+                    "dedupe": {
+                        "type": "boolean",
+                        "description": "按文本哈希去重"
+                    },
+                    "upsert_id": {
+                        "type": "number",
+                        "description": "按已有ID替换记忆"
                     }
                 },
                 "required": ["text"]
@@ -172,9 +188,17 @@ fn execute_tool(data_dir: &Path, name: &str, args: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow::anyhow!("store: 缺少 text 参数"))?;
             let source = args["source"].as_str().unwrap_or("mcp");
             let tags = args["tags"].as_str().unwrap_or("");
+            let memory_type = args["type"].as_str().unwrap_or("fact");
+            let importance = args["importance"].as_f64().unwrap_or(50.0);
+            let dedupe = args["dedupe"].as_bool().unwrap_or(false);
+            let upsert_id = args["upsert_id"].as_u64();
 
             let mut writer = SdsWriter::open(data_dir)?;
-            let mem = writer.store(text, source, tags)?;
+            let mem = if let Some(id) = upsert_id {
+                writer.replace(id, text, source, tags, memory_type, importance)?
+            } else {
+                writer.store_with_options(text, source, tags, memory_type, importance, dedupe)?
+            };
             Ok(serde_json::json!({
                 "content": [
                     {

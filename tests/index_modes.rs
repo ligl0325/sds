@@ -156,3 +156,26 @@ fn test_it_index_009_future_schema_is_rejected() -> anyhow::Result<()> {
     assert!(result.is_err(), "当前程序不能静默读取未来Schema");
     Ok(())
 }
+
+#[test]
+fn test_it_index_010_importance_dedupe_and_upsert() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.path().join(".sds");
+    let mut writer = SdsWriter::open(&data_dir)?;
+
+    let low = writer.store_with_options("重要性排序测试", "test", "p0", "summary", 10.0, false)?;
+    let high = writer.store_with_options("重要性排序测试", "test", "p0", "rule", 100.0, false)?;
+    let results = writer.search("重要性排序", 2, None, None)?;
+    assert_eq!(results[0].id, high.id);
+    assert_eq!(results[0].memory_type, "rule");
+    assert!(results[0].score.unwrap() > results[1].score.unwrap());
+
+    let duplicate = writer.store_with_options("去重测试", "test", "p0", "fact", 50.0, true)?;
+    let same = writer.store_with_options("去重测试", "other", "p0", "fact", 90.0, true)?;
+    assert_eq!(duplicate.id, same.id);
+
+    let replaced = writer.replace(low.id, "upsert后的内容", "test", "p0", "preference", 80.0)?;
+    assert_eq!(replaced.id, low.id);
+    assert_eq!(writer.search("upsert后的内容", 5, None, None)?.len(), 1);
+    Ok(())
+}

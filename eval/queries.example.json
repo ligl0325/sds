@@ -1,0 +1,17 @@
+[
+  {
+    "query": "输入法",
+    "relevant_ids": [],
+    "note": "填写人工确认的相关记忆ID"
+  },
+  {
+    "query": "世家人物关系",
+    "relevant_ids": [],
+    "note": "填写人工确认的相关记忆ID"
+  },
+  {
+    "query": "SDS性能",
+    "relevant_ids": [],
+    "note": "填写人工确认的相关记忆ID"
+  }
+]

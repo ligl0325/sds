@@ -38,7 +38,7 @@ sds search "调研" --json --top 5
 curl --fail --location https://raw.githubusercontent.com/ligl0325/sds/master/scripts/install.sh | bash
 
 # 安装指定版本
-SDS_VERSION=v0.2.0 curl --fail --location https://raw.githubusercontent.com/ligl0325/sds/master/scripts/install.sh | bash
+SDS_VERSION=v0.3.0 curl --fail --location https://raw.githubusercontent.com/ligl0325/sds/master/scripts/install.sh | bash
 ```
 
 安装脚本会校验Release压缩包SHA-256，并同时安装 `sds` 与 `sds-mcp` 到 `~/.local/bin/`。手动安装仍可直接复制二进制：
@@ -53,7 +53,8 @@ chmod +x ~/.local/bin/sds
 ### store — 存储记忆
 
 ```bash
-sds store "内容" --source "来源" --tags "标签1,标签2"
+sds store "内容" --source "来源" --tags "标签1,标签2" \
+  --type rule --importance 90 --dedupe
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -61,6 +62,10 @@ sds store "内容" --source "来源" --tags "标签1,标签2"
 | `text` | 记忆文本内容（必填） | — |
 | `--source` | 来源标签 | `cli` |
 | `--tags` | 逗号分隔标签 | `""` |
+| `--type` | 记忆类型：fact/rule/preference/summary等 | `fact` |
+| `--importance` | 重要性0-100 | `50` |
+| `--dedupe` | 按文本哈希去重 | 否 |
+| `--upsert-id` | 按ID替换已有记忆并保留ID | 不启用 |
 
 ### search — 检索记忆
 
@@ -105,6 +110,8 @@ sds status --json    # JSON 格式
 ```
 
 JSON状态包含 `memories`、`segments`、`files`、`fragmentation_rate` 和 `schema_version`。碎片率定义为 `(segments - 1) / memories × 100%`，越接近0越健康。
+
+搜索排序由BM25、时间新鲜度和重要性组成；默认权重为 `BM25 55% + 时间 20% + 重要性 25%`。旧记录没有元数据时按 `legacy / importance 50` 兼容。
 
 ### backup / restore — 备份与恢复
 
@@ -177,6 +184,8 @@ sds migrate /path/to/memory.db
 ```
 ~/.sds/
 ├── counter          # ID 计数器
+├── metadata.json    # memory_type/importance/text_hash元数据
+├── schema_version   # Schema版本
 ├── sds.lock         # 文件锁
 └── tantivy_index/   # 全文索引
 ```
